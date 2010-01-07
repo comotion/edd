@@ -317,22 +317,22 @@ static uint32_t packet_count;
 
 void got_packet (u_char *useless,const struct pcap_pkthdr *pheader, const u_char *packet)
 {
+   static char flag;
    if ( intr_flag != 0 ) { game_over(); }
    inpacket = 1;
    tstamp = time(NULL);
    const uint32_t p_len = ((pheader->len > SNAPLENGTH)?SNAPLENGTH:pheader->len);
    const uint32_t bits = p_len*8;
    uint32_t set = count_bits_64(packet, p_len);
-   static const double tresh = 100;
+   static const double tresh = 1000;
 
    p_tot[head] = bits;
    p_set[head] = set;
    p_entropy[head] = simple_entropy(set, bits);
 
    packet_count++;
-   if (packet_count < P_WINDOW) {
-       printf("[%lu] %lu/%lu, E(%f)\n", head, set, bits, p_entropy[head]);
-   } else {
+   //printf("[%lu] %lu/%lu, E(%f)\n", head, set, bits, p_entropy[head]);
+   if (packet_count >= P_WINDOW) {
        // we have some packets for analysis
        uint32_t k, total_set = 0, total_bits = 0;
        double sum_entropy = 0;
@@ -343,11 +343,15 @@ void got_packet (u_char *useless,const struct pcap_pkthdr *pheader, const u_char
        }
        double joint_entropy = simple_entropy(total_set, total_bits);
        if(tresh < sum_entropy - joint_entropy ){
-           fprintf(stderr, "ddos attack!!! e(%f) < te(%f)\n", 
+           if (!flag)
+               fprintf(stderr, "ddos attack!!! e(%f) < te(%f)\n", 
                    joint_entropy, sum_entropy);
+           flag = 1;
        }else{
-           fprintf(stdout, "no news, e(%f) >= te(%f)\n", 
+           if (flag)
+               fprintf(stdout, "no news, e(%f) >= te(%f)\n", 
                    joint_entropy, sum_entropy);
+           flag = 0;
        }
    }
 
@@ -462,6 +466,32 @@ void got_packet (u_char *useless,const struct pcap_pkthdr *pheader, const u_char
    inpacket = 0;
    return;
 }
+
+
+void test_it(){
+   /* test it! */
+   uint8_t  b[18];
+   memset((void*) b, 1, 17);
+   b[17]= 0x11;  // the faulty bits
+
+   printf("KnR %lu\n", count_bits(b,17));
+   printf("KaW %lu\n", count_bits_kw(b,17));
+   printf("PaP %lu\n", count_bits_pp(b,17));
+   printf("JaP %lu\n", count_bits_p(b,17));
+   printf("P64 %lu\n", count_bits_64(b,17));
+   printf("T 1 %lu\n", count_bits_t1(b,17));
+   printf("T 2 %lu\n", count_bits_t2(b,17));
+
+   printf("weirdness test: %lu %lu %lu %lu %lu %lu\n", 
+          count_bits_pp(b,17),
+          count_bits_pp(b,17),
+          count_bits_pp(b,17),
+          count_bits_pp(b,17),
+          count_bits_pp(b,17),
+          count_bits_pp(b,17));
+}
+
+
 static void usage() {
     printf("edd: Entropy DDoS Detection\n\n");
     printf("USAGE:\n");
@@ -693,27 +723,6 @@ int main(int argc, char *argv[]) {
    inpacket = intr_flag = chroot_flag = 0;
    timecnt = time(NULL);
    
-   /* test it! */
-   uint8_t  b[18];
-   memset((void*) b, 1, 17);
-   b[17]= 0x11;  // the faulty bits
-
-   printf("KnR %lu\n", count_bits(b,17));
-   printf("KaW %lu\n", count_bits_kw(b,17));
-   printf("PaP %lu\n", count_bits_pp(b,17));
-   printf("JaP %lu\n", count_bits_p(b,17));
-   printf("P64 %lu\n", count_bits_64(b,17));
-   printf("T 1 %lu\n", count_bits_t1(b,17));
-   printf("T 2 %lu\n", count_bits_t2(b,17));
-
-   printf("weirdness test: %lu %lu %lu %lu %lu %lu\n", 
-          count_bits_pp(b,17),
-          count_bits_pp(b,17),
-          count_bits_pp(b,17),
-          count_bits_pp(b,17),
-          count_bits_pp(b,17),
-          count_bits_pp(b,17));
-
    signal(SIGTERM, game_over);
    signal(SIGINT,  game_over);
    signal(SIGQUIT, game_over);
@@ -763,6 +772,7 @@ int main(int argc, char *argv[]) {
          break;
    }
 
+   //test_it();
    printf("[*] Running  %s v %s\n", BIN_NAME, VERSION);
 
 
@@ -817,7 +827,7 @@ int main(int argc, char *argv[]) {
    } 
 
    //alarm(TIMEOUT);
-   printf("[*] Sniffing... need %lu packets for operation\n\n", P_WINDOW);
+   printf("[*] Charging... need %lu to operate correctly.\n\n", P_WINDOW);
    pcap_loop(handle,-1,got_packet,NULL);
 
    pcap_close(handle);
