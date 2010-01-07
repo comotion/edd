@@ -1,1 +1,38 @@
 edd: Entropy DDoS Detector
+
+ * Author: comotion@users.sf.net
+ * Idea by breno.silva@gmail.com
+ http://lists.openinfosecfoundation.org/pipermail/oisf-wg-portscan/2009-October/000023.html
+ * Thanks to ebf0 (http://www.gamelinux.org/) whose support code is good enough
+ * License? If U have the code U have the GPL... >:-P
+
+Entropy  H(P1) + H(P2) + ... + H(Pi) > H(P1P2..Pi) => DDOS
+
+
+Pseudo code:
+   # can segment into destport or src:port:dst:port
+   for each packet
+      count set bits
+      count packet bits
+      sum_entropy = Entropy(packet);
+      track window of n last packets{
+         increase set & total bit values
+         if(H(window) > H(p1p2..pwin)
+            => DDOS!
+      }
+
+/* calculate the simple entropy of a packet, ie
+ * assume all bits are equiprobable and randomly distributed
+ *
+ * needs work: do this with pure, positive ints?
+ * tresholds? markov chains? averaging?
+ * SIMD bitcounts?
+ * 
+ * check this with our friend the kolmogorov
+ */
+
+Special: 
+ - uses simplistic approximation of Entropy: bits set
+ - uses very fast implementation of bitcount (lookup table or parallel)
+ - counts Entropy for all packets, does not segment on port
+
