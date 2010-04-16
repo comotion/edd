@@ -10,7 +10,6 @@ Entropy  H(P1) + H(P2) + ... + H(Pi) > H(P1P2..Pi) => DDOS
 
 
 Pseudo code:
-   # can segment into destport or src:port:dst:port
    for each packet
       count set bits
       count packet bits
@@ -20,7 +19,26 @@ Pseudo code:
          if(H(window) > H(p1p2..pwin)
             => DDOS!
       }
+   done
 
+   # can segment into destport or src:port:dst:port
+   TODO: identify involved services/hosts/networks.
+   foreach port in window
+      do entropy counts per port
+   foreach dst:port in window
+      do entropy counts per host:port
+      do entropy counts per host
+   foreach src in window
+      do entropy counts per src
+   foreach TCP(syn,rst,fin) in window
+      do entropy counts per class
+   foreach data packet
+      do entropy counts on data
+      register src: dst:port
+   graph entropy values / bits of entropy
+
+   + better ways to compute entropy (see simple_entropy())
+   -> tresholds, markov chains, averaging, compression: huffman window or PPZ
  */
 
 
@@ -48,18 +66,23 @@ static int   verbose, inpacket, intr_flag, use_syslog;
 
 time_t       timecnt,tstamp;
 pcap_t       *handle;
-static char  *dev,*dpath,*chroot_dir;
+static char  *dev,*chroot_dir;
 static char  *group_name, *user_name, *true_pid_name;
 static char  *pidfile = "edd.pid";
 static char  *pidpath = "/var/run";
 static int   verbose, inpacket, intr_flag, use_syslog;
+static int   profile_packet;
 
 
 /* our window of packets */
-#define P_WINDOW 0xFF // 256
-static uint32_t p_set[P_WINDOW];
-static uint32_t p_tot[P_WINDOW];
-static double  p_entropy[P_WINDOW];
+//#define P_WINDOW 0xFF // 256
+#define DEFAULT_WINDOW 0xFF
+#define DEFAULT_TRESH  1200.0
+static double tresh = DEFAULT_TRESH;
+static uint32_t p_window = DEFAULT_WINDOW;
+static uint32_t *p_set;
+static uint32_t *p_tot;
+static double  *p_entropy;
 static uint32_t head = 0, tail = 0;
 static uint32_t b_tot = 0, b_set = 0;
 
@@ -248,72 +271,88 @@ inline uint32_t count_bits_t2(const u_char *packet, const uint32_t p_len){
    return set_bits;
 }
 
+
 /* Could do algo selection based on best performance */
 void packet_profiler (const u_char *packet, const uint32_t p_len)
 {
-   uint64_t s, e;
+   volatile uint64_t S, s, e;
    const uint32_t p_bits = p_len*8;
    __asm__ __volatile__("cpuid: rdtsc;" : "=A" (s) :: "ebx", "ecx", "memory");
    uint32_t set_bits = count_bits_pp(packet, p_len);
    __asm__ volatile("rdtsc":"=A"(e));
-   //printf("S: %llu\nD: %llu\ndiff: %lld\n", s, e, e - s);
-   printf("[PP] [%lld] Bytes: %lu, Bits: %lu, Set: %lu\n", e - s,
-          p_len, p_bits, set_bits);
+   printf("== %8llu == PP\n", e-s);
    
    __asm__ volatile("rdtsc":"=A"(s));
    set_bits = count_bits_64(packet, p_len);
    __asm__ volatile("rdtsc":"=A"(e));
-   printf("[64] [%lld] Bytes: %lu, Bits: %lu, Set: %lu\n", e - s,
-          p_len, p_bits, set_bits);
+   printf("== %8llu == 64\n", e-s);
 
    __asm__ volatile("rdtsc":"=A"(s));
    set_bits = count_bits_t1(packet, p_len);
    __asm__ volatile("rdtsc":"=A"(e));
-   printf("[T1] [%lld] Bytes: %lu, Bits: %lu, Set: %lu\n", e - s,
-          p_len, p_bits, set_bits);
+   printf("== %8llu == T1\n", e-s);
 
    __asm__ volatile("rdtsc":"=A"(s));
    set_bits = count_bits_t2(packet, p_len);
    __asm__ volatile("rdtsc":"=A"(e));
-   printf("[T2] [%lld] Bytes: %lu, Bits: %lu, Set: %lu\n", e - s,
-          p_len, p_bits, set_bits);
+   printf("== %8llu == T2\n", e-s);
 
    __asm__ volatile("rdtsc":"=A"(s));
    set_bits = count_bits_p(packet, p_len);
    __asm__ volatile("rdtsc":"=A"(e));
-   printf("[ P] [%lld] Bytes: %lu, Bits: %lu, Set: %lu\n", e - s,
-          p_len, p_bits, set_bits);
+   printf("== %8llu == P \n", e-s);
 
    __asm__ volatile("rdtsc":"=A"(s));
    set_bits = count_bits(packet, p_len);
    __asm__ volatile("rdtsc":"=A"(e));
-   printf("[KR] [%lld] Bytes: %lu, Bits: %lu, Set: %lu\n", e - s,
-          p_len, p_bits, set_bits);
+   printf("== %8llu == KR\n", e-s);
 
    __asm__ volatile("rdtsc":"=A"(s));
    set_bits = count_bits_kw(packet, p_len);
    __asm__ volatile("rdtsc":"=A"(e));
-   printf("[KW] [%lld] Bytes: %lu, Bits: %lu, Set: %lu\n", e - s,
-          p_len, p_bits, set_bits);
+   printf("== %8llu == KW\n", e-s);
 }
 
 /* calculate the simple entropy of a packet, ie
  * assume all bits are equiprobable and randomly distributed
  *
  * needs work: do this with pure, positive ints?
+ * log(x/y) = log(x) - log (y) : (-set/total)=(log(set)-log(total)
  * tresholds? markov chains? averaging?
  * 
  * check this with our friend the kolmogorov
+ *
+ * Basis for this entropy: just guessing:
+ *   Entropy(set_bits) - Entropy (unset_bits) + E(total)
  */
 
 double simple_entropy(double set_bits, double total_bits)
 {
+
+    /* oldscool
     return total_bits * (( -set_bits / total_bits )*log2(set_bits/total_bits)
             - (1 - (set_bits / total_bits) * log2(1 - (set_bits/total_bits))))
             + log2(total_bits);
+     */
+
+    return 
+        ( -set_bits )*(log2(set_bits)-log2(total_bits))
+            - 
+            ( total_bits - set_bits) * ( log2 (total_bits - set_bits) - log2(total_bits) ) //log2(1 - (set_bits/total_bits))
+            + log2(total_bits) ;
 }
 
 static uint32_t packet_count;
+
+void got_packet_profile (u_char *useless,const struct pcap_pkthdr *pheader, const u_char *packet)
+{
+   static char flag;
+   if ( intr_flag != 0 ) { game_over(); }
+   inpacket = 1;
+   const uint32_t p_len = ((pheader->len > SNAPLENGTH)?SNAPLENGTH:pheader->len);
+
+   packet_profiler(packet, p_len);
+}
 
 void got_packet (u_char *useless,const struct pcap_pkthdr *pheader, const u_char *packet)
 {
@@ -323,8 +362,8 @@ void got_packet (u_char *useless,const struct pcap_pkthdr *pheader, const u_char
    tstamp = time(NULL);
    const uint32_t p_len = ((pheader->len > SNAPLENGTH)?SNAPLENGTH:pheader->len);
    const uint32_t bits = p_len*8;
+
    uint32_t set = count_bits_64(packet, p_len);
-   static const double tresh = 1000;
 
    p_tot[head] = bits;
    p_set[head] = set;
@@ -332,11 +371,11 @@ void got_packet (u_char *useless,const struct pcap_pkthdr *pheader, const u_char
 
    packet_count++;
    //printf("[%lu] %lu/%lu, E(%f)\n", head, set, bits, p_entropy[head]);
-   if (packet_count >= P_WINDOW) {
+   if (packet_count >= p_window) {
        // we have some packets for analysis
        uint32_t k, total_set = 0, total_bits = 0;
        double sum_entropy = 0;
-       for(k = 0; k < P_WINDOW; k++){
+       for(k = 0; k < p_window; k++){
            total_set += p_set[k];
            total_bits+= p_tot[k];
            sum_entropy += p_entropy[k];
@@ -344,18 +383,18 @@ void got_packet (u_char *useless,const struct pcap_pkthdr *pheader, const u_char
        double joint_entropy = simple_entropy(total_set, total_bits);
        if(tresh < sum_entropy - joint_entropy ){
            if (!flag)
-               fprintf(stderr, "ddos attack!!! e(%f) < te(%f)\n", 
-                   joint_entropy, sum_entropy);
+               fprintf(stderr, "ddos attack!!! Entropy(%f) < Total_Entropy(%f) over %lu bits\n", 
+                   joint_entropy, sum_entropy, total_bits);
            flag = 1;
        }else{
            if (flag)
-               fprintf(stdout, "no news, e(%f) >= te(%f)\n", 
-                   joint_entropy, sum_entropy);
+               fprintf(stdout, "no news, Entropy(%f) >= Total_Entropy(%f) over %lu bits\n", 
+                   joint_entropy, sum_entropy, total_bits);
            flag = 0;
        }
    }
 
-   head = (head + 1) % P_WINDOW;
+   head = (head + 1) % p_window;
 
 
    ether_header *eth_hdr;
@@ -500,13 +539,17 @@ static void usage() {
     printf(" OPTIONS:\n");
     printf("\n");
     printf(" -i             : network device (default: eth0)\n");
+    printf(" -r             : read pcap file\n");
+    printf(" -w             : packet window size (default: %u)\n", DEFAULT_WINDOW);
     printf(" -b             : berkeley packet filter\n");
-    printf(" -d             : directory to dump sessions files in\n");
+    printf(" -e             : treshold value (default : %f)\n", DEFAULT_TRESH);
     printf(" -u             : user\n");
     printf(" -g             : group\n");
     printf(" -D             : enables daemon mode\n");
     printf(" -T             : dir to chroot into\n");
     printf(" -h             : this help message\n");
+    printf(" -t             : profile counter algoritms\n");
+    printf(" -E             : test edd\n");
     printf(" -v             : verbose\n\n");
 }
 
@@ -715,11 +758,11 @@ int main(int argc, char *argv[]) {
    char *bpff, errbuf[PCAP_ERRBUF_SIZE], *user_filter;
    char *net_ip_string;
    bpf_u_int32 net_mask;
+   char *pcapfile = NULL;
    ch = fromfile = setfilter = version = drop_privs_flag = daemon_flag = 0;
    dev = "eth0";
    bpff = "";
    chroot_dir = "/tmp/";
-   dpath = "./";
    inpacket = intr_flag = chroot_flag = 0;
    timecnt = time(NULL);
    
@@ -729,7 +772,7 @@ int main(int argc, char *argv[]) {
    //signal(SIGHUP,  dump_active);
    //signal(SIGALRM, set_end_sessions); 
 
-   while ((ch = getopt(argc, argv, "b:d:DT:g:hi:p:P:u:v")) != -1)
+   while ((ch = getopt(argc, argv, "b:d:w:e:tDET:g:hi:p:r:P:u:v")) != -1)
    switch (ch) {
       case 'i':
          dev = strdup(optarg);
@@ -737,15 +780,27 @@ int main(int argc, char *argv[]) {
       case 'b':
          bpff = strdup(optarg);
          break;
+      case 'w':
+         p_window = strtol(optarg, NULL, 0);
+         break;
+      case 'e':
+         tresh = strtod(optarg, NULL);
+         break;
       case 'v':
          verbose = 1;
          break;
-      case 'd':
-         dpath = strdup(optarg);
+      case 'r':
+         pcapfile = strdup(optarg);
          break;
       case 'h':
          usage();
          exit(0);
+         break;
+      case 't':
+         profile_packet = 1;
+         break;
+      case 'E':
+         test_it();
          break;
       case 'D':
          daemon_flag = 1;
@@ -772,26 +827,34 @@ int main(int argc, char *argv[]) {
          break;
    }
 
-   //test_it();
-   printf("[*] Running  %s v %s\n", BIN_NAME, VERSION);
+   printf("%s - The Entropy DDoS Detector - version %s\n", BIN_NAME, VERSION);
 
 
-   if (getuid()) {
-      printf("[*] You must be root..\n");
-      return (1);
-   }
+   if (pcapfile) {
+       printf("[*] reading from file %s\n", pcapfile);
+       if((handle = pcap_open_offline(pcapfile, errbuf)) == NULL) {
+           printf("[*] Error pcap_open_offline: %s \n", errbuf);
+           exit(1);
+       }
+   } else {
 
-   errbuf[0] = '\0';
-   /* look up an availible device if non specified */
-   if (dev == 0x0) dev = pcap_lookupdev(errbuf);
-   printf("[*] Device: %s\n", dev);
+       if (getuid()) {
+           printf("[*] You must be root..\n");
+           return (1);
+       }
 
-   if ((handle = pcap_open_live(dev, SNAPLENGTH, 1, 500, errbuf)) == NULL) {
-      printf("[*] Error pcap_open_live: %s \n", errbuf);
-      pcap_close(handle);
-      exit(1);
-   }
-   else if ((pcap_compile(handle, &cfilter, bpff, 1 ,net_mask)) == -1) {
+       errbuf[0] = '\0';
+       /* look up an availible device if non specified */
+       if (dev == 0x0) dev = pcap_lookupdev(errbuf);
+       printf("[*] Device: %s\n", dev);
+
+       if ((handle = pcap_open_live(dev, SNAPLENGTH, 1, 500, errbuf)) == NULL) {
+           printf("[*] Error pcap_open_live: %s \n", errbuf);
+           pcap_close(handle);
+           exit(1);
+       }
+   
+   if ((pcap_compile(handle, &cfilter, bpff, 1 ,net_mask)) == -1) {
       printf("[*] Error pcap_compile user_filter: %s\n", pcap_geterr(handle));
       pcap_close(handle);
       exit(1);
@@ -807,6 +870,7 @@ int main(int argc, char *argv[]) {
       exit(1);
    }
 
+   }
    if ( chroot_flag == 1 ) {
       set_chroot();
    }
@@ -826,9 +890,16 @@ int main(int argc, char *argv[]) {
       drop_privs();
    } 
 
+   p_set = calloc(p_window, sizeof(uint32_t));
+   p_tot = calloc(p_window, sizeof(uint32_t));
+   p_entropy = calloc(p_window, sizeof(uint32_t));
    //alarm(TIMEOUT);
-   printf("[*] Charging... need %lu to operate correctly.\n\n", P_WINDOW);
-   pcap_loop(handle,-1,got_packet,NULL);
+   printf("[*] Charging ddos detector.. need to fill %u-size window of packets.\n\n", p_window+1);
+   if(profile_packet) {
+       pcap_loop(handle,-1,got_packet_profile, NULL);
+   }else {
+       pcap_loop(handle,-1,got_packet,NULL);
+   }
 
    pcap_close(handle);
    return(0);
