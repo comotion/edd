@@ -830,6 +830,7 @@ int main(int argc, char *argv[]) {
    printf("%s - The Entropy DDoS Detector - version %s\n", BIN_NAME, VERSION);
 
 
+   errbuf[0] = '\0';
    if (pcapfile) {
        printf("[*] reading from file %s\n", pcapfile);
        if((handle = pcap_open_offline(pcapfile, errbuf)) == NULL) {
@@ -840,10 +841,10 @@ int main(int argc, char *argv[]) {
 
        if (getuid()) {
            printf("[*] You must be root..\n");
+           usage();
            return (1);
        }
 
-       errbuf[0] = '\0';
        /* look up an availible device if non specified */
        if (dev == 0x0) dev = pcap_lookupdev(errbuf);
        printf("[*] Device: %s\n", dev);
@@ -854,14 +855,18 @@ int main(int argc, char *argv[]) {
            exit(1);
        }
    
-   if ((pcap_compile(handle, &cfilter, bpff, 1 ,net_mask)) == -1) {
-      printf("[*] Error pcap_compile user_filter: %s\n", pcap_geterr(handle));
+   }
+   if ((pcap_compile(handle, &cfilter, bpff, 1, net_mask)) == -1) {
+      printf("[*] Error pcap_compile user_filter '%s' : %s\n", bpff, pcap_geterr(handle));
       pcap_close(handle);
       exit(1);
    }
 
-   pcap_setfilter(handle, &cfilter);
-   pcap_freecode(&cfilter); // filter code not needed after setfilter
+   if(pcap_setfilter(handle, &cfilter)) {
+       printf("[*] Error in pcap_setfilter: %s\n", pcap_geterr(handle));
+       exit(1);
+   }
+   //pcap_freecode(&cfilter); // filter code not needed after setfilter
 
    /* B0rk if we see an error... */
    if (strlen(errbuf) > 0) {
@@ -870,7 +875,6 @@ int main(int argc, char *argv[]) {
       exit(1);
    }
 
-   }
    if ( chroot_flag == 1 ) {
       set_chroot();
    }
